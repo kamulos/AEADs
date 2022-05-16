@@ -131,6 +131,7 @@ dependencies = [
  "chacha20",
  "cipher 0.4.3",
  "poly1305",
+ "subtle",
  "zeroize",
 ]
 

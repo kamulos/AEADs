@@ -153,6 +153,7 @@
 )]
 #![warn(missing_docs, rust_2018_idioms)]
 
+mod chacha20poly1305legacy;
 mod cipher;
 
 pub use aead;
