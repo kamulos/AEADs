@@ -15,7 +15,6 @@ use poly1305::{universal_hash::UniversalHash, Block, Poly1305};
 use subtle::ConstantTimeEq;
 
 #[derive(Clone)]
-#[cfg_attr(docsrs, doc(cfg(feature = "legacy")))]
 pub struct ChaCha20Poly1305Legacy {
     /// Secret key
     key: Key,
@@ -74,7 +73,7 @@ const BLOCK_SIZE: usize = 64;
 
 /// Maximum number of blocks that can be encrypted with ChaCha20 before the
 /// counter overflows.
-const MAX_BLOCKS: usize = core::u32::MAX as usize;
+const MAX_BLOCKS: usize = core::u32::MAX as usize; // TODO
 
 /// ChaCha20Poly1305 instantiated with a particular nonce
 pub(crate) struct Cipher<C>
@@ -162,44 +161,67 @@ where
 
 struct BufferedPoly1305 {
     poly1305: Poly1305,
-    remainder: [u8; poly1305::BLOCK_SIZE],
-    rem_size: usize,
+    block_buffer: BlockBuffer,
 }
 
 impl BufferedPoly1305 {
     fn new(key: &poly1305::Key) -> Self {
         BufferedPoly1305 {
             poly1305: Poly1305::new(key),
-            remainder: [0; 16],
-            rem_size: 0,
+            block_buffer: BlockBuffer::new(),
         }
     }
 
     fn update_buffered(&mut self, data: &[u8]) {
-        if data.len() + self.rem_size < self.remainder.len() {
-            self.remainder[self.rem_size..self.rem_size + data.len()].copy_from_slice(data);
-            self.rem_size += data.len();
-        } else {
-            let (head, body) = data.split_at(self.remainder.len() - self.rem_size);
-            self.remainder[self.rem_size..self.rem_size + head.len()].copy_from_slice(head);
-            self.poly1305
-                .update([*Block::from_slice(&self.remainder)].as_slice()); // TODO
-
-            let mut chunks = body.chunks_exact(poly1305::BLOCK_SIZE);
-
-            for chunk in chunks.by_ref() {
-                self.poly1305.update([*Block::from_slice(chunk)].as_slice()); // TODO
-            }
-
-            let rem = chunks.remainder();
-
-            self.remainder[0..rem.len()].copy_from_slice(rem);
-            self.rem_size = rem.len();
+        if let Some((buffered_block, complete_blocks)) = self.block_buffer.add_slice(data) {
+            self.poly1305.update(&[buffered_block]);
+            self.poly1305.update_padded(complete_blocks); // TODO
         }
     }
 
     fn finalize(self) -> poly1305::Tag {
         self.poly1305
-            .compute_unpadded(&self.remainder[..self.rem_size])
+            .compute_unpadded(self.block_buffer.remainder())
+    }
+}
+
+struct BlockBuffer {
+    block: poly1305::Block,
+    size: usize,
+}
+
+impl BlockBuffer {
+    pub fn new() -> Self {
+        Self {
+            block: Default::default(),
+            size: 0,
+        }
+    }
+
+    pub fn add_slice<'a>(&mut self, data: &'a [u8]) -> Option<(poly1305::Block, &'a [u8])> {
+        let rem_size = poly1305::BLOCK_SIZE - self.size;
+        let start_idx = core::cmp::min(rem_size, data.len());
+
+        self.block[self.size..self.size + start_idx].copy_from_slice(&data[..start_idx]);
+        self.size += start_idx;
+
+        match data.get(start_idx..) {
+            Some(chunkable) if chunkable.len() > 0 => {
+                let tail_split = chunkable.len() - chunkable.len() % poly1305::BLOCK_SIZE;
+                let (body, tail) = chunkable.split_at(tail_split);
+
+                let returned_block = self.block;
+
+                self.block[..tail.len()].copy_from_slice(&tail);
+                self.size = tail.len();
+
+                Some((returned_block, body))
+            }
+            _ => None,
+        }
+    }
+
+    pub fn remainder(&self) -> &[u8] {
+        &self.block[..self.size]
     }
 }
