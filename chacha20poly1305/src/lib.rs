@@ -137,6 +137,7 @@
 //! # }
 //! ```
 
+pub mod chacha20poly1305legacy;
 mod cipher;
 
 pub use aead::{self, AeadCore, AeadInOut, Error, KeyInit, KeySizeUser, consts};
