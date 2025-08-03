@@ -174,7 +174,7 @@ struct BlockBuffer {
 }
 
 impl BlockBuffer {
-    pub fn new() -> Self {
+    fn new() -> Self {
         Self {
             block: Default::default(),
             size: 0,
@@ -185,41 +185,42 @@ impl BlockBuffer {
         &mut self,
         data: &'a [u8],
     ) -> Option<(poly1305::Block, &'a [poly1305::Block])> {
-        let (add_to_block, other_data, emit_block) = self.split_data(data);
-        let (other_blocks, remainder) = Array::slice_as_chunks(other_data);
+        let (first_block_data, other_data) = self.split_data(data);
 
-        if emit_block {
-            let first_block = self.emit_block(add_to_block);
+        if let Some(first_block) = self.extend_block(first_block_data) {
+            let (other_blocks, remainder) = Array::slice_as_chunks(other_data);
             self.replace_block(remainder);
             Some((first_block, other_blocks))
         } else {
-            assert!(other_blocks.is_empty());
-            assert!(remainder.is_empty());
-            self.extend_block(add_to_block);
+            assert!(other_data.is_empty());
             None
         }
     }
 
-    pub fn remainder(&self) -> &[u8] {
+    fn remainder(&self) -> &[u8] {
         &self.block[..self.size]
     }
 
-    fn split_data<'a>(&self, data: &'a [u8]) -> (&'a [u8], &'a [u8], bool) {
+    fn split_data<'a>(&self, data: &'a [u8]) -> (&'a [u8], &'a [u8]) {
         let free_capacity = poly1305::BLOCK_SIZE - self.size;
 
         let add_to_block = data.get(..free_capacity).unwrap_or(data);
-        let other_data = data.get(free_capacity..).unwrap_or_default(); // TODO as Option?
-        let emit_block = data.len() >= free_capacity;
+        let other_data = data.get(free_capacity..).unwrap_or_default();
 
-        (add_to_block, other_data, emit_block)
+        (add_to_block, other_data)
     }
 
-    fn emit_block(&self, data: &[u8]) -> poly1305::Block {
-        assert!(self.size + data.len() == poly1305::BLOCK_SIZE);
+    fn extend_block(&mut self, data: &[u8]) -> Option<poly1305::Block> {
+        assert!(self.size + data.len() <= poly1305::BLOCK_SIZE);
 
-        let mut block = self.block;
-        block[self.size..].clone_from_slice(data);
-        block
+        self.block[self.size..self.size + data.len()].clone_from_slice(data);
+        self.size += data.len();
+
+        if self.size == poly1305::BLOCK_SIZE {
+            Some(self.block)
+        } else {
+            None
+        }
     }
 
     fn replace_block(&mut self, data: &[u8]) {
@@ -227,12 +228,5 @@ impl BlockBuffer {
 
         self.block[..data.len()].clone_from_slice(data);
         self.size = data.len();
-    }
-
-    fn extend_block(&mut self, data: &[u8]) {
-        assert!(self.size + data.len() < poly1305::BLOCK_SIZE);
-
-        self.block[self.size..self.size + data.len()].clone_from_slice(data);
-        self.size += data.len();
     }
 }
