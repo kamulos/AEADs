@@ -158,7 +158,7 @@ impl BufferedPoly1305 {
     fn update_buffered(&mut self, data: &[u8]) {
         if let Some((buffered_block, complete_blocks)) = self.block_buffer.add_slice(data) {
             self.poly1305.update(&[buffered_block]);
-            self.poly1305.update_padded(complete_blocks); // TODO
+            self.poly1305.update(complete_blocks);
         }
     }
 
@@ -181,30 +181,58 @@ impl BlockBuffer {
         }
     }
 
-    pub fn add_slice<'a>(&mut self, data: &'a [u8]) -> Option<(poly1305::Block, &'a [u8])> {
-        let rem_size = poly1305::BLOCK_SIZE - self.size;
-        let start_idx = core::cmp::min(rem_size, data.len());
+    pub fn add_slice<'a>(
+        &mut self,
+        data: &'a [u8],
+    ) -> Option<(poly1305::Block, &'a [poly1305::Block])> {
+        let (add_to_block, other_data, emit_block) = self.split_data(data);
+        let (other_blocks, remainder) = Array::slice_as_chunks(other_data);
 
-        self.block[self.size..self.size + start_idx].copy_from_slice(&data[..start_idx]);
-        self.size += start_idx;
-
-        match data.get(start_idx..) {
-            Some(chunkable) if chunkable.len() > 0 => {
-                let tail_split = chunkable.len() - chunkable.len() % poly1305::BLOCK_SIZE;
-                let (body, tail) = chunkable.split_at(tail_split);
-
-                let returned_block = self.block;
-
-                self.block[..tail.len()].copy_from_slice(&tail);
-                self.size = tail.len();
-
-                Some((returned_block, body))
-            }
-            _ => None,
+        if emit_block {
+            let first_block = self.emit_block(add_to_block);
+            self.replace_block(remainder);
+            Some((first_block, other_blocks))
+        } else {
+            assert!(other_blocks.is_empty());
+            assert!(remainder.is_empty());
+            self.extend_block(add_to_block);
+            None
         }
     }
 
     pub fn remainder(&self) -> &[u8] {
         &self.block[..self.size]
+    }
+
+    fn split_data<'a>(&self, data: &'a [u8]) -> (&'a [u8], &'a [u8], bool) {
+        let free_capacity = poly1305::BLOCK_SIZE - self.size;
+
+        let add_to_block = data.get(..free_capacity).unwrap_or(data);
+        let other_data = data.get(free_capacity..).unwrap_or_default(); // TODO as Option?
+        let emit_block = data.len() >= free_capacity;
+
+        (add_to_block, other_data, emit_block)
+    }
+
+    fn emit_block(&self, data: &[u8]) -> poly1305::Block {
+        assert!(self.size + data.len() == poly1305::BLOCK_SIZE);
+
+        let mut block = self.block;
+        block[self.size..].clone_from_slice(data);
+        block
+    }
+
+    fn replace_block(&mut self, data: &[u8]) {
+        assert!(data.len() < poly1305::BLOCK_SIZE);
+
+        self.block[..data.len()].clone_from_slice(data);
+        self.size = data.len();
+    }
+
+    fn extend_block(&mut self, data: &[u8]) {
+        assert!(self.size + data.len() < poly1305::BLOCK_SIZE);
+
+        self.block[self.size..self.size + data.len()].clone_from_slice(data);
+        self.size += data.len();
     }
 }
