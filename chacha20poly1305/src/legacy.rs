@@ -39,10 +39,24 @@ impl AeadInOut for ChaCha20Poly1305Legacy {
         &self,
         nonce: &LegacyNonce,
         associated_data: &[u8],
-        buffer: InOutBuf<'_, '_, u8>,
+        mut buffer: InOutBuf<'_, '_, u8>,
     ) -> Result<Tag, Error> {
-        Cipher::new(ChaCha20Legacy::new(&self.key, nonce))
-            .encrypt_inout_detached(associated_data, buffer)
+        let (mut cipher, mut mac) = self.init_cipher(nonce);
+
+        if buffer.len() / BLOCK_SIZE >= MAX_BLOCKS {
+            return Err(Error);
+        }
+
+        // TODO(tarcieri): interleave encryption with Poly1305
+        // See: <https://github.com/RustCrypto/AEADs/issues/74>
+        cipher.apply_keystream_inout(buffer.reborrow());
+
+        mac.update_buffered(associated_data);
+        mac.update_buffered(&(associated_data.len() as u64).to_le_bytes());
+        mac.update_buffered(buffer.get_out());
+        mac.update_buffered(&(buffer.len() as u64).to_le_bytes());
+
+        Ok(mac.finalize())
     }
 
     fn decrypt_inout_detached(
@@ -52,11 +66,38 @@ impl AeadInOut for ChaCha20Poly1305Legacy {
         buffer: InOutBuf<'_, '_, u8>,
         tag: &Tag,
     ) -> Result<(), Error> {
-        Cipher::new(ChaCha20Legacy::new(&self.key, nonce)).decrypt_inout_detached(
-            associated_data,
-            buffer,
-            tag,
-        )
+        let (mut cipher, mut mac) = self.init_cipher(nonce);
+
+        if buffer.len() / BLOCK_SIZE >= MAX_BLOCKS {
+            return Err(Error);
+        }
+
+        mac.update_buffered(associated_data);
+        mac.update_buffered(&(associated_data.len() as u64).to_le_bytes());
+        mac.update_buffered(buffer.get_in());
+        mac.update_buffered(&(buffer.len() as u64).to_le_bytes());
+
+        let expected_tag = mac.finalize();
+
+        // This performs a constant-time comparison using the `subtle` crate
+        if expected_tag.ct_eq(tag).unwrap_u8() == 1 {
+            // TODO(tarcieri): interleave decryption with Poly1305
+            // See: <https://github.com/RustCrypto/AEADs/issues/74>
+            cipher.apply_keystream_inout(buffer);
+            Ok(())
+        } else {
+            Err(Error)
+        }
+
+        // // This performs a constant-time comparison using the `subtle` crate
+        // if self.mac.verify(tag).is_ok() {
+        //     // TODO(tarcieri): interleave decryption with Poly1305
+        //     // See: <https://github.com/RustCrypto/AEADs/issues/74>
+        //     self.cipher.apply_keystream_inout(buffer);
+        //     Ok(())
+        // } else {
+        //     Err(Error)
+        // }
     }
 }
 
@@ -80,21 +121,9 @@ const BLOCK_SIZE: usize = 64;
 /// counter overflows.
 const MAX_BLOCKS: usize = u32::MAX as usize;
 
-/// ChaCha20Poly1305 instantiated with a particular nonce
-pub(crate) struct Cipher<C>
-where
-    C: StreamCipher + StreamCipherSeek,
-{
-    cipher: C,
-    mac: BufferedPoly1305,
-}
-
-impl<C> Cipher<C>
-where
-    C: StreamCipher + StreamCipherSeek,
-{
-    /// Instantiate the underlying cipher with a particular nonce
-    pub(crate) fn new(mut cipher: C) -> Self {
+impl ChaCha20Poly1305Legacy {
+    fn init_cipher(&self, nonce: &LegacyNonce) -> (ChaCha20Legacy, BufferedPoly1305) {
+        let mut cipher = ChaCha20Legacy::new(&self.key, nonce);
         // Derive Poly1305 key from the first 32-bytes of the ChaCha20 keystream
         let mut mac_key = poly1305::Key::default();
         cipher.apply_keystream(&mut mac_key);
@@ -109,73 +138,7 @@ where
         // Set ChaCha20 counter to 1
         cipher.seek(BLOCK_SIZE as u64);
 
-        Self { cipher, mac }
-    }
-
-    /// Encrypt the given message in-place, returning the authentication tag
-    pub(crate) fn encrypt_inout_detached(
-        mut self,
-        associated_data: &[u8],
-        mut buffer: InOutBuf<'_, '_, u8>,
-    ) -> Result<Tag, Error> {
-        if buffer.len() / BLOCK_SIZE >= MAX_BLOCKS {
-            return Err(Error);
-        }
-
-        // TODO(tarcieri): interleave encryption with Poly1305
-        // See: <https://github.com/RustCrypto/AEADs/issues/74>
-        self.cipher.apply_keystream_inout(buffer.reborrow());
-
-        self.mac.update_buffered(associated_data);
-        self.mac
-            .update_buffered(&(associated_data.len() as u64).to_le_bytes());
-        self.mac.update_buffered(buffer.get_out());
-        self.mac
-            .update_buffered(&(buffer.len() as u64).to_le_bytes());
-
-        Ok(self.mac.finalize())
-    }
-
-    /// Decrypt the given message, first authenticating ciphertext integrity
-    /// and returning an error if it's been tampered with.
-    pub(crate) fn decrypt_inout_detached(
-        mut self,
-        associated_data: &[u8],
-        buffer: InOutBuf<'_, '_, u8>,
-        tag: &Tag,
-    ) -> Result<(), Error> {
-        if buffer.len() / BLOCK_SIZE >= MAX_BLOCKS {
-            return Err(Error);
-        }
-
-        self.mac.update_buffered(associated_data);
-        self.mac
-            .update_buffered(&(associated_data.len() as u64).to_le_bytes());
-        self.mac.update_buffered(buffer.get_in());
-        self.mac
-            .update_buffered(&(buffer.len() as u64).to_le_bytes());
-
-        let expected_tag = self.mac.finalize();
-
-        // This performs a constant-time comparison using the `subtle` crate
-        if expected_tag.ct_eq(tag).unwrap_u8() == 1 {
-            // TODO(tarcieri): interleave decryption with Poly1305
-            // See: <https://github.com/RustCrypto/AEADs/issues/74>
-            self.cipher.apply_keystream_inout(buffer);
-            Ok(())
-        } else {
-            Err(Error)
-        }
-
-        // // This performs a constant-time comparison using the `subtle` crate
-        // if self.mac.verify(tag).is_ok() {
-        //     // TODO(tarcieri): interleave decryption with Poly1305
-        //     // See: <https://github.com/RustCrypto/AEADs/issues/74>
-        //     self.cipher.apply_keystream_inout(buffer);
-        //     Ok(())
-        // } else {
-        //     Err(Error)
-        // }
+        (cipher, mac)
     }
 }
 
