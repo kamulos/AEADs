@@ -1,8 +1,7 @@
 use crate::{Key, Tag};
 use aead::{
     self, AeadCore, AeadInOut, Error, KeyInit, KeySizeUser, TagPosition,
-    array::{Array, ArraySize},
-    consts,
+    array::Array,
     consts::{U8, U16, U32},
     inout::InOutBuf,
 };
@@ -77,10 +76,8 @@ impl AeadInOut for ChaCha20Poly1305Legacy {
         mac.update_buffered(buffer.get_in());
         mac.update_buffered(&(buffer.len() as u64).to_le_bytes());
 
-        let expected_tag = mac.finalize();
-
         // This performs a constant-time comparison using the `subtle` crate
-        if expected_tag.ct_eq(tag).unwrap_u8() == 1 {
+        if mac.verify(tag).is_ok() {
             // TODO(tarcieri): interleave decryption with Poly1305
             // See: <https://github.com/RustCrypto/AEADs/issues/74>
             cipher.apply_keystream_inout(buffer);
@@ -88,16 +85,6 @@ impl AeadInOut for ChaCha20Poly1305Legacy {
         } else {
             Err(Error)
         }
-
-        // // This performs a constant-time comparison using the `subtle` crate
-        // if self.mac.verify(tag).is_ok() {
-        //     // TODO(tarcieri): interleave decryption with Poly1305
-        //     // See: <https://github.com/RustCrypto/AEADs/issues/74>
-        //     self.cipher.apply_keystream_inout(buffer);
-        //     Ok(())
-        // } else {
-        //     Err(Error)
-        // }
     }
 }
 
@@ -162,6 +149,14 @@ impl BufferedPoly1305 {
         }
     }
 
+    fn verify(self, expected: &poly1305::Block) -> Result<(), Error> {
+        if self.finalize().ct_eq(expected).into() {
+            Ok(())
+        } else {
+            Err(Error)
+        }
+    }
+
     fn finalize(self) -> poly1305::Tag {
         self.poly1305
             .compute_unpadded(self.block_buffer.remainder())
@@ -181,7 +176,7 @@ impl BlockBuffer {
         }
     }
 
-    pub fn add_slice<'a>(
+    fn add_slice<'a>(
         &mut self,
         data: &'a [u8],
     ) -> Option<(poly1305::Block, &'a [poly1305::Block])> {
