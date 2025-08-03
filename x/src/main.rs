@@ -1,6 +1,4 @@
-use chacha20poly1305::{
-    aead::Aead, chacha20poly1305legacy::ChaCha20Poly1305Legacy, AeadInPlace, KeyInit,
-};
+use chacha20poly1305::{aead::Aead, aead::AeadInOut, legacy::ChaCha20Poly1305Legacy, KeyInit};
 use sodiumoxide::crypto::aead::chacha20poly1305::{self as sodiumoxidecipher, Key, Nonce, Tag};
 
 fn main() {
@@ -12,7 +10,11 @@ fn main() {
     let mut rustbuf = myplain.to_owned();
     let rust = ChaCha20Poly1305Legacy::new(mykey.into());
     let rusttag = rust
-        .encrypt_in_place_detached(mynonce.into(), myad.as_slice(), rustbuf.as_mut_slice())
+        .encrypt_inout_detached(
+            mynonce.into(),
+            myad.as_slice(),
+            rustbuf.as_mut_slice().into(),
+        )
         .unwrap();
 
     let rustcipherhex = hex::encode(rustbuf);
@@ -45,11 +47,11 @@ fn main() {
     let rustplainstring = core::str::from_utf8(&rustbuf).unwrap();
     println!("{rustplainstring}");
 
-    rust.decrypt_in_place_detached(
+    rust.decrypt_inout_detached(
         mynonce.into(),
         myad.as_slice(),
-        sodiumbuf.as_mut_slice(),
-        sodiumtag.0.as_ref().into(),
+        sodiumbuf.as_mut_slice().into(),
+        &sodiumtag.0.into(),
     )
     .unwrap();
 

@@ -214,6 +214,7 @@ dependencies = [
  "chacha20",
  "cipher",
  "poly1305",
+ "subtle",
  "zeroize",
 ]
 
